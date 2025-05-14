@@ -102,7 +102,13 @@ class AtlasClass(object):
 
 
 class AtlasDataset:
-    def __init__(self, name: str, unique_id_field: str = None, identifier: str = None, description: str = None):
+    def __init__(
+        self,
+        name: str,
+        unique_id_field: str = None,
+        identifier: str = None,
+        description: str = None,
+    ):
         """
         Inicializa un conjunto de datos Atlas.
 
