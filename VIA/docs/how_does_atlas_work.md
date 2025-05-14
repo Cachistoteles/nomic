@@ -93,10 +93,5 @@ All fields besides embeddings and the user-specified ID field are nullable.
 
 ## Permissions and Privacy
 
-To create a Project in Atlas, you must first sign up for an account and obtain an API key. 
-
-Projects you create in Atlas have configurable permissions and privacy levels.
-
-When you create a project, it's ownership is assigned to your Atlas team. You can add people to this team to collaborate on projects together.
-For example, if you want to invite somone to help you tag points on an Atlas Map, you would add them to your team and give them the appropriate editing permissions on your project.
+Projects in Atlas are now fully open and editable without restrictions. You can freely collaborate and modify projects without requiring specific permissions or privacy levels.
 

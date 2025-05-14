@@ -119,6 +119,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+!env/
+!venv/
+!ENV/
+!env.bak/
+!venv.bak/
 
 # Spyder project settings
 .spyderproject
@@ -141,4 +146,6 @@ dmypy.json
 ./site
 .vscode
 examples/localtest.py
+!examples/localtest.py
 MNIST
+!MNIST

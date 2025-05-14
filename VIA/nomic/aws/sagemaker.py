@@ -1,15 +1,7 @@
-import concurrent.futures
-import io
-import json
-import logging
-import multiprocessing as mp
+import boto3
+import sagemaker
 from pathlib import PosixPath
 from typing import List, Optional, Tuple, Union
-
-import boto3
-import PIL
-import PIL.Image
-import sagemaker
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -33,7 +25,6 @@ def parse_sagemaker_response(response):
     Returns:
         np.float16 array of embeddings.
     """
-    # Parse json header size length from the response
     resp = json.loads(response["Body"].read().decode())
     return resp["embeddings"]
 
@@ -54,26 +45,22 @@ def batch_transform_text(
     Batch transform a list of texts using a sagemaker model.
 
     Args:
-        s3_input_path: S3 path to the input data. Input data should be a csv file without any column headers
-            with each line containing a single text.
-        s3_output_path: S3 path to save the output embeddings. Embeddings will be in order of the input data.
+        s3_input_path: S3 path to the input data.
+        s3_output_path: S3 path to save the output embeddings.
         region_name: AWS region to use.
         arn: The model package arn to use.
-        role: Arn of the IAM role to use (must have permissions to S3 data as well).
+        role: Arn of the IAM role to use.
         max_payload: The maximum payload size in megabytes.
         instance_type: The instance type to use.
         n_instances: The number of instances to use.
         wait: Whether method should wait for job to finish.
-        logs: Whether to log the job status (only meaningful if wait is True).
+        logs: Whether to log the job status.
+
     Returns:
         The job name.
     """
-    if arn is None:
-        raise ValueError("model package arn is currently required.")
-
-    if role is None:
-        logger.info("No role provided. Using default sagemaker role.")
-        role = _get_sagemaker_role()
+    if arn is None or role is None:
+        raise ValueError("ARN and role must be provided.")
 
     sm_client = boto3.client("sagemaker", region_name=region_name)
     sm_session = sagemaker.Session(
@@ -84,7 +71,7 @@ def batch_transform_text(
         name=arn.split("/")[-1],
         role=role,
         model_data=None,
-        sagemaker_session=sm_session,  # makes sure the right region is used
+        sagemaker_session=sm_session,
         model_package_arn=arn,
     )
     embedder = model.transformer(
@@ -102,10 +89,7 @@ def batch_transform_text(
         wait=wait,
         logs=logs,
     )
-    job_name = None
-    if embedder.latest_transform_job is not None:
-        job_name = embedder.latest_transform_job.name
-    return job_name
+    return embedder.latest_transform_job.name if embedder.latest_transform_job else None
 
 
 def embed_text(
@@ -132,7 +116,6 @@ def embed_text(
     Returns:
         Dictionary with "embeddings" (python 2d list of floats), "model" (sagemaker endpoint used to generate embeddings).
     """
-
     if len(texts) == 0:
         logger.warning("No texts to embed.")
         return None
@@ -164,7 +147,9 @@ def embed_text(
                 "task_type": task_type,
             }
         )
-        response = client.invoke_endpoint(EndpointName=sagemaker_endpoint, Body=batch, ContentType="application/json")
+        response = client.invoke_endpoint(
+            EndpointName=sagemaker_endpoint, Body=batch, ContentType="application/json"
+        )
         embeddings.extend(parse_sagemaker_response(response))
 
     return {
@@ -174,9 +159,16 @@ def embed_text(
     }
 
 
-# only way I could get sagemaker with multipart to work
 def prepare_multipart_request(images: List[Tuple[str, bytes]]) -> Tuple[bytes, bytes]:
-    # Prepare the multipart body
+    """
+    Prepare the multipart body for sagemaker image embedding.
+
+    Args:
+        images: List of tuples containing image name and bytes.
+
+    Returns:
+        Tuple containing the body and boundary for the multipart request.
+    """
     boundary = b"---------------------------Boundary"
     body = b""
     for i, (name, img_bytes) in enumerate(images):
@@ -221,6 +213,17 @@ def preprocess_image(images: List[Union[str, "PIL.Image.Image", bytes]]) -> Tupl
 def sagemaker_image_request(
     images: List[Union[str, bytes, "PIL.Image.Image"]], sagemaker_endpoint: str, region_name: str
 ):
+    """
+    Send a request to sagemaker endpoint for image embedding.
+
+    Args:
+        images: List of images to be embedded.
+        sagemaker_endpoint: The sagemaker endpoint to use.
+        region_name: AWS region sagemaker endpoint is in.
+
+    Returns:
+        Parsed response from sagemaker.
+    """
     body, boundary = preprocess_image(images)
 
     client = boto3.client("sagemaker-runtime", region_name=region_name)
@@ -240,6 +243,19 @@ def embed_image(
     model_name="nomic-embed-vision-v1.5",
     batch_size=16,
 ) -> dict:
+    """
+    Embed a list of images using a sagemaker model endpoint.
+
+    Args:
+        images: List of images to be embedded.
+        sagemaker_endpoint: The sagemaker endpoint to use.
+        region_name: AWS region sagemaker endpoint is in.
+        model_name: Name of the model used for embedding.
+        batch_size: Size of each batch. Default is 16.
+
+    Returns:
+        Dictionary with "embeddings" (python 2d list of floats), "model" (sagemaker endpoint used to generate embeddings).
+    """
     embeddings = []
 
     pbar = tqdm(total=len(images))
@@ -273,17 +289,17 @@ def batch_transform_image(
     Batch transform a list of texts using a sagemaker model.
 
     Args:
-        s3_input_path: S3 path to the input data. Input data should be a csv file without any column headers
-            with each line containing a single text.
-        s3_output_path: S3 path to save the output embeddings. Embeddings will be in order of the input data.
+        s3_input_path: S3 path to the input data.
+        s3_output_path: S3 path to save the output embeddings.
         region_name: AWS region to use.
         arn: The model package arn to use.
-        role: Arn of the IAM role to use (must have permissions to S3 data as well).
+        role: Arn of the IAM role to use.
         max_payload: The maximum payload size in megabytes.
         instance_type: The instance type to use.
         n_instances: The number of instances to use.
         wait: Whether method should wait for job to finish.
-        logs: Whether to log the job status (only meaningful if wait is True).
+        logs: Whether to log the job status.
+
     Returns:
         The job name.
     """
@@ -303,7 +319,7 @@ def batch_transform_image(
         name=arn.split("/")[-1],
         role=role,
         model_data=None,
-        sagemaker_session=sm_session,  # makes sure the right region is used
+        sagemaker_session=sm_session,
         model_package_arn=arn,
     )
     embedder = model.transformer(
@@ -320,7 +336,4 @@ def batch_transform_image(
         wait=wait,
         logs=logs,
     )
-    job_name = None
-    if embedder.latest_transform_job is not None:
-        job_name = embedder.latest_transform_job.name
-    return job_name
+    return embedder.latest_transform_job.name if embedder.latest_transform_job else None

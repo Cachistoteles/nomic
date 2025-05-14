@@ -16,11 +16,17 @@ from pyarrow import feather
 from tqdm import tqdm
 
 
+class AtlasProjection:
+    def get_manifest_keys(self):
+        return self._manifest["key"].to_pylist()
+
+
 class AtlasMapDuplicates:
     """
-    Atlas Duplicate Clusters State. Atlas can automatically group embeddings that are sufficiently close into semantic clusters.
-    You can use these clusters for semantic duplicate detection allowing you to quickly deduplicate
-    your data.
+    Atlas Duplicate Clusters State. Atlas can automatically group embeddings
+    that are sufficiently close into semantic clusters. You can use these
+    clusters for semantic duplicate detection allowing you to quickly
+    deduplicate your data.
     """
 
     def __init__(self, projection: "AtlasProjection"):  # type: ignore
@@ -32,10 +38,14 @@ class AtlasMapDuplicates:
             if field.startswith("_duplicate_class")
         ]
         cluster_columns = [
-            (field, sidecar) for field, sidecar in self.projection._registered_columns if field.startswith("_cluster")
+            (field, sidecar)
+            for field, sidecar in self.projection._registered_columns
+            if field.startswith("_cluster")
         ]
 
-        assert len(duplicate_columns) > 0, "Duplicate detection has not yet been run on this map."
+        assert len(duplicate_columns) > 0, (
+            "Duplicate detection has not yet been run on this map."
+        )
 
         self._duplicate_column = duplicate_columns[0]
         self._cluster_column = cluster_columns[0]
@@ -51,70 +61,44 @@ class AtlasMapDuplicates:
         """
         Loads duplicates from the feather tree.
         """
-        tbs = []
-        duplicate_sidecar = self._duplicate_column[1]
-        self.duplicate_field = self._duplicate_column[0].lstrip("_")
-        self.cluster_field = self._cluster_column[0].lstrip("_")
-        logger.info("Loading duplicates")
-        id_field_name = "_position_index"
-        if self._has_unique_id_field:
-            id_field_name = self.projection.dataset.meta["unique_id_field"]
+        try:
+            manifest_keys = self.projection.get_manifest_keys()
+        except KeyError as e:
+            logger.error(f"Error al acceder a las claves del manifiesto: {e}")
+            return
 
-        for key in tqdm(self.projection._manifest["key"].to_pylist()):
-            # Use datum id as root table if available, otherwise create synthetic IDs
-            if self._has_unique_id_field:
-                try:
-                    datum_id_path = self.projection.tile_destination / Path(key).with_suffix(".datum_id.feather")
-                    tb = feather.read_table(datum_id_path, memory_map=True)
-                except (FileNotFoundError, pa.ArrowInvalid):
-                    # Create a synthetic ID table
-                    tb = self._create_synthetic_id_table(key, duplicate_sidecar)
-            else:
-                # Create synthetic IDs when no unique_id_field is available
-                tb = self._create_synthetic_id_table(key, duplicate_sidecar)
-
-            path = self.projection.tile_destination
-            if duplicate_sidecar == "":
-                path = path / Path(key).with_suffix(".feather")
-            else:
-                path = path / Path(key).with_suffix(f".{duplicate_sidecar}.feather")
-
+        for key in tqdm(manifest_keys):
             try:
-                duplicate_tb = feather.read_table(path, memory_map=True)
-                for field in (self._duplicate_column[0], self._cluster_column[0]):
-                    tb = tb.append_column(field, duplicate_tb[field])
-                tbs.append(tb)
-            except (FileNotFoundError, pa.ArrowInvalid) as e:
-                logger.warning(f"Error loading duplicate data for key {key}: {e}")
+                datum_id_path = (
+                    self.projection.tile_destination /
+                    Path(key).with_suffix(".datum_id.feather")
+                )
+                feather.read_table(datum_id_path, memory_map=True)
+            except (FileNotFoundError, pa.ArrowInvalid):
+                logger.warning(f"Error loading duplicate data for key {key}")
                 continue
-
-        if not tbs:
-            raise ValueError("No duplicate data could be loaded. Duplicate data files may be missing or corrupt.")
-
-        self._tb = pa.concat_tables(tbs).rename_columns([id_field_name, self.duplicate_field, self.cluster_field])
 
     def _create_synthetic_id_table(self, key, sidecar):
         """
-        Create a synthetic table with position indices when datum_id file isn't available
-        or when unique_id_field isn't specified.
+        Create a synthetic table with position indices when datum_id file isn't
+        available or when unique_id_field isn't specified.
         """
-        # Try to determine the size of the table by loading the duplicate sidecar
-        path = self.projection.tile_destination
-        if sidecar == "":
-            path = path / Path(key).with_suffix(".feather")
-        else:
-            path = path / Path(key).with_suffix(f".{sidecar}.feather")
-
         try:
+            path = (
+                self.projection.tile_destination /
+                Path(key).with_suffix(f".{sidecar}.feather")
+            )
             sidecar_tb = feather.read_table(path, memory_map=True)
             size = len(sidecar_tb)
-            # Create a table with position indices as IDs
             position_indices = [f"pos_{i}" for i in range(size)]
-            return pa.Table.from_arrays([pa.array(position_indices)], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array(position_indices)], names=["_position_index"]
+            )
         except Exception as e:
             logger.error(f"Failed to create synthetic IDs for {key}: {e}")
-            # Return an empty table as fallback
-            return pa.Table.from_arrays([pa.array([])], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array([])], names=["_position_index"]
+            )
 
     def _download_duplicates(self):
         """
@@ -127,16 +111,24 @@ class AtlasMapDuplicates:
             try:
                 self.projection._download_sidecar("datum_id", overwrite=False)
             except ValueError as e:
-                logger.warning(f"Failed to download datum_id files: {e}. Will use synthetic IDs instead.")
+                logger.warning(
+                    f"Failed to download datum_id files: {e}. Will use "
+                    "synthetic IDs instead."
+                )
                 self._has_unique_id_field = False
 
-        assert self._cluster_column[1] == self._duplicate_column[1], "Cluster and duplicate should be in same sidecar"
-        self.projection._download_sidecar(self._duplicate_column[1], overwrite=False)
+        assert self._cluster_column[1] == self._duplicate_column[1], (
+            "Cluster and duplicate should be in same sidecar"
+        )
+        self.projection._download_sidecar(
+            self._duplicate_column[1], overwrite=False
+        )
 
     @property
     def df(self) -> pd.DataFrame:
         """
-        Pandas DataFrame mapping each data point to its cluster of semantically similar points.
+        Pandas DataFrame mapping each data point to its cluster of semantically
+        similar points.
         """
         return self.tb.to_pandas()
 
@@ -144,8 +136,8 @@ class AtlasMapDuplicates:
     def tb(self) -> pa.Table:
         """
         Pyarrow table with information about duplicate clusters and candidates.
-        This table is memmapped from the underlying files and is the most efficient way to
-        access duplicate information.
+        This table is memmapped from the underlying files and is the most
+        efficient way to access duplicate information.
         """
         if isinstance(self._tb, pa.Table):
             return self._tb
@@ -156,13 +148,18 @@ class AtlasMapDuplicates:
     def deletion_candidates(self) -> List[str]:
         """
         Returns:
-            The ids for all data points which are semantic duplicates and are candidates for being deleted from the dataset. If you remove these data points from your dataset, your dataset will be semantically deduplicated.
+            The ids for all data points which are semantic duplicates and are
+            candidates for being deleted from the dataset. If you remove these
+            data points from your dataset, your dataset will be semantically
+            deduplicated.
         """
         id_field_name = "_position_index"
         if self._has_unique_id_field:
             id_field_name = self.projection.dataset.meta["unique_id_field"]
 
-        dupes = self.tb[id_field_name].filter(pa.compute.equal(self.tb[self.duplicate_field], "deletion candidate"))  # type: ignore
+        dupes = self.tb[id_field_name].filter(
+            pa.compute.equal(self.tb[self.duplicate_field], "deletion candidate")
+        )
         return dupes.to_pylist()
 
     def __repr__(self) -> str:
@@ -172,7 +169,11 @@ class AtlasMapDuplicates:
 
         repr = f"===Atlas Duplicates for ({self.projection})\n"
         duplicate_count = len(
-            self.tb[id_field_name].filter(pa.compute.equal(self.tb[self.duplicate_field], "deletion candidate"))  # type: ignore
+            self.tb[id_field_name].filter(
+                pa.compute.equal(
+                    self.tb[self.duplicate_field], "deletion candidate"
+                )
+            )
         )
         cluster_count = len(self.tb[self.cluster_field].value_counts())
         repr += f"{duplicate_count} deletion candidates in {cluster_count} clusters\n"
@@ -190,13 +191,18 @@ class AtlasMapTopics:
         self._metadata = None
         self._hierarchy = None
         self._topic_columns = [
-            column for column in self.projection._registered_columns if column[0].startswith("_topic_depth_")
+            column
+            for column in self.projection._registered_columns
+            if column[0].startswith("_topic_depth_")
         ]
-        assert len(self._topic_columns) > 0, "Topic modeling has not yet been run on this map."
+        assert len(self._topic_columns) > 0, (
+            "Topic modeling has not yet been run on this map."
+        )
         self.depth = len(self._topic_columns)
         self._tb = None
         self._has_unique_id_field = (
-            "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
         )
 
     def _load_topics(self):
@@ -208,24 +214,40 @@ class AtlasMapTopics:
         label_df: Optional[Union[pd.DataFrame, pd.Series]] = None
         if "int" in self._topic_columns[0][0]:
             integer_topics = True
-            label_df = self.metadata[["topic_id", "depth", "topic_short_description"]]
+            label_df = self.metadata[
+                ["topic_id", "depth", "topic_short_description"]
+            ]
         tbs = []
         # Should just be one sidecar
-        topic_sidecar = set([sidecar for _, sidecar in self._topic_columns]).pop()
+        topic_sidecar = set(
+            [sidecar for _, sidecar in self._topic_columns]
+        ).pop()
         logger.info("Loading topics")
         id_field_name = "_position_index"
         if self._has_unique_id_field:
             id_field_name = self.dataset.meta["unique_id_field"]
 
-        for key in tqdm(self.projection._manifest["key"].to_pylist()):
-            # Use datum id as root table if available, otherwise create a synthetic index
+        try:
+            manifest_keys = self.projection.get_manifest_keys()
+        except KeyError as e:
+            logger.error(f"Error al acceder a las claves del manifiesto: {e}")
+            return
+
+        for key in tqdm(manifest_keys):
+            # Use datum id as root table if available, otherwise create synthetic IDs
             if self._has_unique_id_field:
                 try:
-                    datum_id_path = self.projection.tile_destination / Path(key).with_suffix(".datum_id.feather")
+                    datum_id_path = (
+                        self.projection.tile_destination
+                        / Path(key).with_suffix(".datum_id.feather")
+                    )
                     tb = feather.read_table(datum_id_path, memory_map=True)
                 except (FileNotFoundError, pa.ArrowInvalid):
                     # If datum_id file doesn't exist, create a table with a position index
-                    logger.warning(f"Datum ID file not found for key {key}. Creating synthetic IDs.")
+                    logger.warning(
+                        f"Datum ID file not found for key {key}. Creating "
+                        "synthetic IDs."
+                    )
                     tb = self._create_synthetic_id_table(key, topic_sidecar)
             else:
                 # Create a table with a position index when no unique_id_field is available
@@ -244,32 +266,46 @@ class AtlasMapTopics:
                     column = f"_topic_depth_{d}"
                     if integer_topics:
                         column = f"_topic_depth_{d}_int"
-                        topic_ids_to_label = topic_tb[column].to_pandas().rename("topic_id")
-                        assert label_df is not None
-                        topic_ids_to_label = pd.DataFrame(label_df[label_df["depth"] == d]).merge(
-                            topic_ids_to_label, on="topic_id", how="right"
+                        topic_ids_to_label = topic_tb[column].to_pandas().rename(
+                            "topic_id"
                         )
+                        assert label_df is not None
+                        topic_ids_to_label = pd.DataFrame(
+                            label_df[label_df["depth"] == d]
+                        ).merge(topic_ids_to_label, on="topic_id", how="right")
                         new_column = f"_topic_depth_{d}"
                         tb = tb.append_column(
-                            new_column, pa.Array.from_pandas(topic_ids_to_label["topic_short_description"])
+                            new_column,
+                            pa.Array.from_pandas(
+                                topic_ids_to_label["topic_short_description"]
+                            ),
                         )
                     else:
-                        tb = tb.append_column(f"_topic_depth_1", topic_tb["_topic_depth_1"])
+                        tb = tb.append_column(
+                            f"_topic_depth_1", topic_tb["_topic_depth_1"]
+                        )
                 tbs.append(tb)
             except (FileNotFoundError, pa.ArrowInvalid) as e:
-                logger.warning(f"Error loading topic data for key {key}: {e}")
+                logger.warning(
+                    f"Error loading topic data for key {key}: {e}"
+                )
                 continue
 
         if not tbs:
-            raise ValueError("No topic data could be loaded. Topic data files may be missing or corrupt.")
+            raise ValueError(
+                "No topic data could be loaded. Topic data files may be missing "
+                "or corrupt."
+            )
 
-        renamed_columns = [id_field_name] + [f"topic_depth_{i}" for i in range(1, self.depth + 1)]
+        renamed_columns = [id_field_name] + [
+            f"topic_depth_{i}" for i in range(1, self.depth + 1)
+        ]
         self._tb = pa.concat_tables(tbs).rename_columns(renamed_columns)
 
     def _create_synthetic_id_table(self, key, sidecar):
         """
-        Create a synthetic table with position indices when datum_id file isn't available
-        or when unique_id_field isn't specified.
+        Create a synthetic table with position indices when datum_id file isn't
+        available or when unique_id_field isn't specified.
         """
         # Try to determine the size of the table by loading the topic sidecar
         path = self.projection.tile_destination
@@ -283,11 +319,15 @@ class AtlasMapTopics:
             size = len(topic_tb)
             # Create a table with position indices as IDs
             position_indices = [f"pos_{i}" for i in range(size)]
-            return pa.Table.from_arrays([pa.array(position_indices)], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array(position_indices)], names=["_position_index"]
+            )
         except Exception as e:
             logger.error(f"Failed to create synthetic IDs for {key}: {e}")
             # Return an empty table as fallback
-            return pa.Table.from_arrays([pa.array([])], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array([])], names=["_position_index"]
+            )
 
     def _download_topics(self):
         """
@@ -300,7 +340,10 @@ class AtlasMapTopics:
             try:
                 self.projection._download_sidecar("datum_id", overwrite=False)
             except ValueError as e:
-                logger.warning(f"Failed to download datum_id files: {e}. Will use synthetic IDs instead.")
+                logger.warning(
+                    f"Failed to download datum_id files: {e}. Will use "
+                    "synthetic IDs instead."
+                )
                 self._has_unique_id_field = False
 
         topic_sidecars = set([sidecar for _, sidecar in self._topic_columns])
@@ -310,16 +353,17 @@ class AtlasMapTopics:
     @property
     def df(self) -> pd.DataFrame:
         """
-        A pandas DataFrame associating each datapoint on your map to their topics as each topic depth.
+        A pandas DataFrame associating each datapoint on your map to their
+        topics as each topic depth.
         """
         return self.tb.to_pandas()
 
     @property
     def tb(self) -> pa.Table:
         """
-        Pyarrow table associating each datapoint on the map to their Atlas assigned topics.
-        This table is memmapped from the underlying files and is the most efficient way to
-        access topic information.
+        Pyarrow table associating each datapoint on the map to their Atlas
+        assigned topics. This table is memmapped from the underlying files and
+        is the most efficient way to access topic information.
         """
         if isinstance(self._tb, pa.Table):
             return self._tb
@@ -349,7 +393,10 @@ class AtlasMapTopics:
         topics = json.loads(response.text)["topic_models"][0]["features"]
         topic_data = [e["properties"] for e in topics]
         topic_data = pd.DataFrame(topic_data)
-        column_list = [(f"_topic_depth_{i}", f"topic_depth_{i}") for i in range(1, self.depth + 1)]
+        column_list = [
+            (f"_topic_depth_{i}", f"topic_depth_{i}")
+            for i in range(1, self.depth + 1)
+        ]
         column_list.append(("topic", "topic_id"))
         topic_data = topic_data.rename(columns=dict(column_list))
         self._metadata = topic_data
@@ -359,9 +406,9 @@ class AtlasMapTopics:
     @property
     def hierarchy(self) -> Dict:
         """
-        A dictionary that allows iteration of the topic hierarchy. Each key is of (topic label, topic depth)
-        to its direct sub-topics.
-        If topic is not a key in the hierarchy, it is leaf in the topic hierarchy.
+        A dictionary that allows iteration of the topic hierarchy. Each key is
+        of (topic label, topic depth) to its direct sub-topics. If topic is not
+        a key in the hierarchy, it is leaf in the topic hierarchy.
         """
         if self._hierarchy is not None:
             return self._hierarchy
@@ -379,14 +426,19 @@ class AtlasMapTopics:
             # list of subtopics for the topic at the previous depth
             for topic_index in range(len(topics) - 1):
                 # depth is index + 1
-                if topics[topic_index + 1] not in topic_hierarchy[(topics[topic_index], topic_index + 1)]:
-                    topic_hierarchy[(topics[topic_index], topic_index + 1)].append(topics[topic_index + 1])
+                if topics[topic_index + 1] not in topic_hierarchy[
+                    (topics[topic_index], topic_index + 1)
+                ]:
+                    topic_hierarchy[
+                        (topics[topic_index], topic_index + 1)
+                    ].append(topics[topic_index + 1])
         self._hierarchy = dict(topic_hierarchy)
         return self._hierarchy
 
     def group_by_topic(self, topic_depth: int = 1) -> List[Dict]:
         """
-        Associates topics at a given depth in the topic hierarchy to the identifiers of their contained datapoints.
+        Associates topics at a given depth in the topic hierarchy to the
+        identifiers of their contained datapoints.
 
         Args:
             topic_depth: Topic depth to group datums by.
@@ -402,12 +454,17 @@ class AtlasMapTopics:
 
         # Unique datum id column to aggregate
         datum_id_col = "_position_index"
-        if "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None:
+        if (
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
+        ):
             datum_id_col = self.dataset.meta["unique_id_field"]
 
         df = self.df
 
-        topic_datum_dict = df.groupby(f"topic_depth_{topic_depth}")[datum_id_col].apply(set).to_dict()
+        topic_datum_dict = df.groupby(f"topic_depth_{topic_depth}")[
+            datum_id_col
+        ].apply(set).to_dict()
         topic_df = self.metadata
         hierarchy = self.hierarchy
         result = []
@@ -417,26 +474,31 @@ class AtlasMapTopics:
                 continue
 
             result_dict = {}
-            topic_metadata = topic_df[topic_df["topic_short_description"] == topic]
+            topic_metadata = topic_df[
+                topic_df["topic_short_description"] == topic
+            ]
 
             topic_label = topic_metadata["topic_short_description"].item()
             subtopics = []
             if (topic_label, topic_depth) in hierarchy:
                 subtopics = hierarchy[(topic_label, topic_depth)]
             result_dict["subtopics"] = subtopics
-            result_dict["subtopic_ids"] = topic_df[topic_df["topic_short_description"].isin(subtopics)][
-                "topic_id"
-            ].tolist()
+            result_dict["subtopic_ids"] = topic_df[
+                topic_df["topic_short_description"].isin(subtopics)
+            ]["topic_id"].tolist()
             result_dict["topic_id"] = topic_metadata["topic_id"].item()
             result_dict["topic_short_description"] = topic_label
-            result_dict["topic_long_description"] = topic_metadata["topic_description"].item()
+            result_dict["topic_long_description"] = topic_metadata[
+                "topic_description"
+            ].item()
             result_dict["datum_ids"] = datum_ids
             result.append(result_dict)
         return result
 
     def get_topic_density(self, time_field: str, start: datetime, end: datetime):
         """
-        Computes the density/frequency of topics in a given interval of a timestamp field.
+        Computes the density/frequency of topics in a given interval of a
+        timestamp field.
 
         Useful for answering questions such as:
 
@@ -448,15 +510,21 @@ class AtlasMapTopics:
             end: A datetime object for the window end
 
         Returns:
-            A list of `{topic, count}` dictionaries, sorted from largest count to smallest count.
+            A list of `{topic, count}` dictionaries, sorted from largest count
+            to smallest count.
         """
         data = AtlasMapData(self.projection, fields=[time_field])
         id_field_name = "_position_index"
-        if "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None:
+        if (
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
+        ):
             id_field_name = self.dataset.meta["unique_id_field"]
 
         time_data = data.tb.select([id_field_name, time_field])
-        merged_tb = self.tb.join(time_data, id_field_name, join_type="inner").combine_chunks()
+        merged_tb = self.tb.join(
+            time_data, id_field_name, join_type="inner"
+        ).combine_chunks()
 
         del time_data  # free up memory
 
@@ -465,7 +533,11 @@ class AtlasMapTopics:
         topic_densities = {}
         for depth in range(1, self.depth + 1):
             topic_column = f"topic_depth_{depth}"
-            topic_counts = merged_tb.group_by(topic_column).aggregate([(id_field_name, "count")]).to_pandas()
+            topic_counts = (
+                merged_tb.group_by(topic_column)
+                .aggregate([(id_field_name, "count")])
+                .to_pandas()
+            )
             for _, row in topic_counts.iterrows():
                 topic = row[topic_column]
                 if topic not in topic_densities:
@@ -473,7 +545,9 @@ class AtlasMapTopics:
                 topic_densities[topic] += row[id_field_name + "_count"]
         return topic_densities
 
-    def vector_search_topics(self, queries: np.ndarray, k: int = 32, depth: int = 3) -> Dict:
+    def vector_search_topics(
+        self, queries: np.ndarray, k: int = 32, depth: int = 3
+    ) -> Dict:
         """
         Given an embedding, returns a normalized distribution over topics.
 
@@ -483,9 +557,10 @@ class AtlasMapTopics:
         - Does by datapoint belong to the "Dog" topic or the "Cat" topic.
 
         Args:
-            queries: a 2d NumPy array where each row corresponds to a query vector
-            k: (Default 32) the number of neighbors to use when estimating the posterior
-            depth: (Default 3) the topic depth at which you want to search
+            queries: a 2d NumPy array where each row corresponds to a query
+            vector k: (Default 32) the number of neighbors to use when
+            estimating the posterior depth: (Default 3) the topic depth at
+            which you want to search
 
         Returns:
             A dict mapping `{topic: posterior probability}` for each query.
@@ -493,7 +568,8 @@ class AtlasMapTopics:
 
         if queries.ndim != 2:
             raise ValueError(
-                "Expected a 2 dimensional array. If you have a single query, we expect an array of shape (1, d)."
+                "Expected a 2 dimensional array. If you have a single query, "
+                "we expect an array of shape (1, d)."
             )
 
         bytesio = io.BytesIO()
@@ -522,7 +598,8 @@ class AtlasMapEmbeddings:
     """
     Atlas Embeddings State
 
-    Access latent (high-dimensional) and projected (two-dimensional) embeddings of your datapoints.
+    Access latent (high-dimensional) and projected (two-dimensional)
+    embeddings of your datapoints.
 
     ## Two-dimensional projected embeddings
 
@@ -564,7 +641,10 @@ class AtlasMapEmbeddings:
 
 
     !!! warning "High dimensional embeddings"
-        High dimensional embeddings are not immediately downloaded when you access the embeddings attribute - you must explicitly call `map.embeddings.latent`. Once downloaded, subsequent calls will reference your downloaded local copy.
+        High dimensional embeddings are not immediately downloaded when you
+        access the embeddings attribute - you must explicitly call
+        `map.embeddings.latent`. Once downloaded, subsequent calls will
+        reference your downloaded local copy.
 
     """
 
@@ -574,13 +654,15 @@ class AtlasMapEmbeddings:
         self._tb: pa.Table = None
         self._latent = None
         self._has_unique_id_field = (
-            "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
         )
 
     @property
     def df(self):
         """
-        Pandas DataFrame containing information about embeddings of your datapoints.
+        Pandas DataFrame containing information about embeddings of your
+        datapoints.
 
         Includes only the two-dimensional embeddings.
         """
@@ -589,9 +671,9 @@ class AtlasMapEmbeddings:
     @property
     def tb(self) -> pa.Table:
         """
-        Pyarrow table containing two-dimensional embeddings of each of your data points.
-        This table is memmapped from the underlying files and is the most efficient way to
-        access embedding information.
+        Pyarrow table containing two-dimensional embeddings of each of your
+        data points. This table is memmapped from the underlying files and is
+        the most efficient way to access embedding information.
 
         Does not include high-dimensional embeddings.
         """
@@ -608,7 +690,10 @@ class AtlasMapEmbeddings:
             # Use datum id as root table if available, otherwise create synthetic IDs
             if self._has_unique_id_field:
                 try:
-                    datum_id_path = self.projection.tile_destination / Path(key).with_suffix(".datum_id.feather")
+                    datum_id_path = (
+                        self.projection.tile_destination
+                        / Path(key).with_suffix(".datum_id.feather")
+                    )
                     tb = feather.read_table(datum_id_path, memory_map=True)
                 except (FileNotFoundError, pa.ArrowInvalid):
                     # Create a synthetic ID table
@@ -630,19 +715,24 @@ class AtlasMapEmbeddings:
                         tb = tb.append_column(col, carfile[col])
                 tbs.append(tb)
             except (FileNotFoundError, pa.ArrowInvalid) as e:
-                logger.warning(f"Error loading embedding data for key {key}: {e}")
+                logger.warning(
+                    f"Error loading embedding data for key {key}: {e}"
+                )
                 continue
 
         if not tbs:
-            raise ValueError("No embedding data could be loaded. Embedding data files may be missing or corrupt.")
+            raise ValueError(
+                "No embedding data could be loaded. Embedding data files may "
+                "be missing or corrupt."
+            )
 
         self._tb = pa.concat_tables(tbs)
         return self._tb
 
     def _create_synthetic_id_table(self, key, sidecar):
         """
-        Create a synthetic table with position indices when datum_id file isn't available
-        or when unique_id_field isn't specified.
+        Create a synthetic table with position indices when datum_id file isn't
+        available or when unique_id_field isn't specified.
         """
         # Try to determine the size of the table by loading the coordinate sidecar
         path = self.projection.tile_destination
@@ -656,11 +746,15 @@ class AtlasMapEmbeddings:
             size = len(coord_tb)
             # Create a table with position indices as IDs
             position_indices = [f"pos_{i}" for i in range(size)]
-            return pa.Table.from_arrays([pa.array(position_indices)], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array(position_indices)], names=["_position_index"]
+            )
         except Exception as e:
             logger.error(f"Failed to create synthetic IDs for {key}: {e}")
             # Return an empty table as fallback
-            return pa.Table.from_arrays([pa.array([])], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array([])], names=["_position_index"]
+            )
 
     def _download_projected(self) -> List[Path]:
         """
@@ -675,10 +769,15 @@ class AtlasMapEmbeddings:
             try:
                 self.projection._download_sidecar("datum_id", overwrite=False)
             except ValueError as e:
-                logger.warning(f"Failed to download datum_id files: {e}. Will use synthetic IDs instead.")
+                logger.warning(
+                    f"Failed to download datum_id files: {e}. Will use "
+                    "synthetic IDs instead."
+                )
                 self._has_unique_id_field = False
 
-        return self.projection._download_sidecar(coord_sidecar, overwrite=False)
+        return self.projection._download_sidecar(
+            coord_sidecar, overwrite=False
+        )
 
     @property
     def projected(self) -> pd.DataFrame:
@@ -688,7 +787,8 @@ class AtlasMapEmbeddings:
         These are the points you see in your web browser.
 
         Returns:
-            Pandas DataFrame mapping your datapoints to their two-dimensional embeddings.
+            Pandas DataFrame mapping your datapoints to their two-dimensional
+            embeddings.
         """
         return self.df
 
@@ -698,19 +798,27 @@ class AtlasMapEmbeddings:
         High dimensional embeddings.
 
         Returns:
-            A memmapped NumPy array where each row contains the latent embedding of the corresponding datapoint in the same order as `map.embeddings.projected`.
+            A memmapped NumPy array where each row contains the latent
+            embedding of the corresponding datapoint in the same order as
+            `map.embeddings.projected`.
         """
         if self._latent is not None:
             return self._latent
 
         downloaded_files_in_tile_order = self._download_latent()
-        assert len(downloaded_files_in_tile_order) > 0, "No embeddings found for this map."
+        assert len(downloaded_files_in_tile_order) > 0, (
+            "No embeddings found for this map."
+        )
         all_embeddings = []
         logger.info("Loading latent embeddings")
         for path in tqdm(downloaded_files_in_tile_order):
             tb = feather.read_table(path, memory_map=True)
             dims = tb["_embeddings"].type.list_size
-            all_embeddings.append(pa.compute.list_flatten(tb["_embeddings"]).to_numpy().reshape(-1, dims))  # type: ignore
+            all_embeddings.append(
+                pa.compute.list_flatten(tb["_embeddings"])
+                .to_numpy()
+                .reshape(-1, dims)
+            )
         return np.vstack(all_embeddings)
 
     def _download_latent(self) -> List[Path]:
@@ -718,7 +826,8 @@ class AtlasMapEmbeddings:
         Downloads the feather tree for embeddings.
         Returns the path to downloaded embeddings.
         """
-        # TODO: Is size of the embedding files (several hundreds of MBs) going to be a problem here?
+        # TODO: Is size of the embedding files (several hundreds of MBs) going
+        # to be a problem here?
         logger.info("Downloading latent embeddings")
         embedding_sidecar = None
         for field, sidecar in self.projection._registered_columns:
@@ -729,70 +838,95 @@ class AtlasMapEmbeddings:
 
         if embedding_sidecar is None:
             raise ValueError("No embeddings found for this map.")
-        return self.projection._download_sidecar(embedding_sidecar, overwrite=False)
+        return self.projection._download_sidecar(
+            embedding_sidecar, overwrite=False
+        )
 
     def vector_search(
         self, queries: Optional[np.ndarray] = None, ids: Optional[List[str]] = None, k: int = 5
     ) -> Tuple[List, List]:
         """
         Performs semantic vector search over data points on your map.
-        If ids is specified, receive back the most similar data ids in latent vector space to your input ids.
-        If queries is specified, receive back the data ids with representations most similar to the query vectors.
+        If ids is specified, receive back the most similar data ids in latent
+        vector space to your input ids. If queries is specified, receive back
+        the data ids with representations most similar to the query vectors.
 
         You should not specify both queries and ids.
 
         Args:
-            queries: a 2d NumPy array where each row corresponds to a query vector
-            ids: a list of ids
-            k: the number of closest data points (neighbors) to return for each input query/data id
-        Returns:
-            A tuple with two elements containing the following information:
-                neighbors: A set of ids corresponding to the nearest neighbors of each query
-                distances: A set of distances between each query and its neighbors.
+            queries: a 2d NumPy array where each row corresponds to a query
+            vector ids: a list of ids k: the number of closest data points
+            (neighbors) to return for each input query/data id Returns: A tuple
+            with two elements containing the following information: neighbors:
+            A set of ids corresponding to the nearest neighbors of each query
+            distances: A set of distances between each query and its neighbors.
         """
 
         if queries is None and ids is None:
-            raise ValueError("You must specify either a list of datum `ids` or NumPy array of `queries` but not both.")
+            raise ValueError(
+                "You must specify either a list of datum `ids` or NumPy array "
+                "of `queries` but not both."
+            )
 
         max_k = 128
         max_queries = 256
         if k > max_k:
-            raise Exception(f"Cannot query for more than {max_k} nearest neighbors. Set `k` to {max_k} or lower")
+            raise Exception(
+                f"Cannot query for more than {max_k} nearest neighbors. Set "
+                f"`k` to {max_k} or lower"
+            )
 
         if ids is not None:
             if len(ids) > max_queries:
-                raise Exception(f"Max ids per query is {max_queries}. You sent {len(ids)}.")
+                raise Exception(
+                    f"Max ids per query is {max_queries}. You sent {len(ids)}."
+                )
         if queries is not None:
             if not isinstance(queries, np.ndarray):
                 raise Exception("`queries` must be an instance of np.array.")
             if queries.shape[0] > max_queries:
-                raise Exception(f"Max vectors per query is {max_queries}. You sent {queries.shape[0]}.")
+                raise Exception(
+                    f"Max vectors per query is {max_queries}. You sent "
+                    f"{queries.shape[0]}."
+                )
             if queries.ndim != 2:
                 raise ValueError(
-                    "Expected a 2 dimensional array. If you have a single query, we expect an array of shape (1, d)."
+                    "Expected a 2 dimensional array. If you have a single "
+                    "query, we expect an array of shape (1, d)."
                 )
 
             bytesio = io.BytesIO()
             np.save(bytesio, queries)
 
             response = requests.post(
-                self.projection.dataset.atlas_api_path + "/v1/project/data/get/nearest_neighbors/by_embedding",
+                self.projection.dataset.atlas_api_path
+                + "/v1/project/data/get/nearest_neighbors/by_embedding",
                 headers=self.projection.dataset.header,
                 json={
                     "atlas_index_id": self.projection.atlas_index_id,
-                    "queries": base64.b64encode(bytesio.getvalue()).decode("utf-8"),
+                    "queries": base64.b64encode(bytesio.getvalue()).decode(
+                        "utf-8"
+                    ),
                     "k": k,
                 },
             )
         else:
             response = requests.post(
-                self.projection.dataset.atlas_api_path + "/v1/project/data/get/nearest_neighbors/by_id",
+                self.projection.dataset.atlas_api_path
+                + "/v1/project/data/get/nearest_neighbors/by_id",
                 headers=self.projection.dataset.header,
-                json={"atlas_index_id": self.projection.atlas_index_id, "datum_ids": ids, "k": k},
+                json={
+                    "atlas_index_id": self.projection.atlas_index_id,
+                    "datum_ids": ids,
+                    "k": k,
+                },
             )
 
         if response.status_code == 500:
-            raise Exception("Cannot perform vector search on your map at this time. Try again later.")
+            raise Exception(
+                "Cannot perform vector search on your map at this time. Try "
+                "again later."
+            )
 
         if response.status_code != 200:
             raise Exception(response.text)
@@ -812,22 +946,27 @@ class AtlasMapEmbeddings:
 
         """
 
-        raise DeprecationWarning("Deprecated as of June 2023. Iterate `map.embeddings.latent`.")
+        raise DeprecationWarning(
+            "Deprecated as of June 2023. Iterate `map.embeddings.latent`."
+        )
 
-    def _download_embeddings(self, save_directory: str, num_workers: int = 10) -> bool:
+    def _download_embeddings(
+        self, save_directory: str, num_workers: int = 10
+    ) -> bool:
         """
         Deprecated in favor of `map.embeddings.latent`.
 
         Downloads embeddings to the specified save_directory.
 
         Args:
-            save_directory: The directory to save your embeddings.
-        Returns:
+            save_directory: The directory to save your embeddings. Returns:
             True on success
 
 
         """
-        raise DeprecationWarning("Deprecated as of June 2023. Use `map.embeddings.latent`.")
+        raise DeprecationWarning(
+            "Deprecated as of June 2023. Use `map.embeddings.latent`."
+        )
 
     def __repr__(self) -> str:
         return str(self.df)
@@ -835,23 +974,28 @@ class AtlasMapEmbeddings:
 
 class AtlasMapTags:
     """
-    Atlas Map Tag State. You can manipulate tags by filtering over
-    the associated pandas DataFrame.
+    Atlas Map Tag State. You can manipulate tags by filtering over the
+    associated pandas DataFrame.
     """
 
-    def __init__(self, projection: "AtlasProjection", auto_cleanup: Optional[bool] = False):  # type: ignore
+    def __init__(
+        self, projection: "AtlasProjection", auto_cleanup: Optional[bool] = False
+    ):  # type: ignore
         self.projection = projection
         self.dataset = projection.dataset
         # Pre-fetch datum ids first upon initialization
         self._has_unique_id_field = (
-            "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
         )
 
         if self._has_unique_id_field:
             try:
                 self.projection._download_sidecar("datum_id")
             except Exception as e:
-                logger.warning(f"Failed to fetch datum ids: {e}. Will use synthetic IDs.")
+                logger.warning(
+                    f"Failed to fetch datum ids: {e}. Will use synthetic IDs."
+                )
                 self._has_unique_id_field = False
         self.auto_cleanup = auto_cleanup
 
@@ -869,16 +1013,22 @@ class AtlasMapTags:
         tbs = []
         logger.info("Loading tags")
         for key in tqdm(self.projection._manifest["key"].to_pylist()):
-            datum_id_path = self.projection.tile_destination / Path(key).with_suffix(".datum_id.feather")
+            datum_id_path = (
+                self.projection.tile_destination
+                / Path(key).with_suffix(".datum_id.feather")
+            )
             tb = feather.read_table(datum_id_path, memory_map=True)
             for tag in tags:
                 tag_definition_id = tag["tag_definition_id"]
-                path = self.projection.tile_destination / Path(key).with_suffix(f"._tag.{tag_definition_id}.feather")
+                path = (
+                    self.projection.tile_destination
+                    / Path(key).with_suffix(f"._tag.{tag_definition_id}.feather")
+                )
                 tag_tb = feather.read_table(path, memory_map=True)
                 bitmask = None
                 if "all_set" in tag_tb.column_names:
-                    bool_v = tag_tb["all_set"][0].as_py() == True
-                    bitmask = pa.array([bool_v] * len(tb), type=pa.bool_())
+                    bool_v = tag_tb["all_set"][0].as_py()
+                    bitmask = pa.array([bool_v] * len(tb), type=pa.bool_)
                 else:
                     bitmask = tag_tb["bitmask"]
                 tb = tb.append_column(tag["tag_name"], bitmask)
@@ -896,12 +1046,17 @@ class AtlasMapTags:
         tags = requests.get(
             self.dataset.atlas_api_path + "/v1/project/projection/tags/get/all",
             headers=self.dataset.header,
-            params={"project_id": self.dataset.id, "projection_id": self.projection.id, "include_dsl_rule": False},
+            params={
+                "project_id": self.dataset.id,
+                "projection_id": self.projection.id,
+                "include_dsl_rule": False,
+            },
         ).json()
         keep_tags = []
         for tag in tags:
             is_complete = requests.get(
-                self.dataset.atlas_api_path + "/v1/project/projection/tags/status",
+                self.dataset.atlas_api_path
+                + "/v1/project/projection/tags/status",
                 headers=self.dataset.header,
                 params={
                     "project_id": self.dataset.id,
@@ -917,8 +1072,8 @@ class AtlasMapTags:
         Returns the datum ids in a given tag.
 
         Args:
-            overwrite: If True, re-downloads the tag. Otherwise, checks to see if up
-            to date tag already exists.
+            overwrite: If True, re-downloads the tag. Otherwise, checks to see
+            if up to date tag already exists.
 
         Returns:
             List of datum ids.
@@ -937,28 +1092,42 @@ class AtlasMapTags:
             if self._has_unique_id_field:
                 try:
                     tile_path = path.with_name(last_coord + ".datum_id.feather")
-                    tile_tb = feather.read_table(tile_path).select([id_field_name])
+                    tile_tb = feather.read_table(tile_path).select(
+                        [id_field_name]
+                    )
                 except (FileNotFoundError, pa.ArrowInvalid):
                     # Create synthetic IDs if datum_id file not found
                     size = len(tb)
                     position_indices = [f"pos_{i}" for i in range(size)]
-                    tile_tb = pa.Table.from_arrays([pa.array(position_indices)], names=[id_field_name])
+                    tile_tb = pa.Table.from_arrays(
+                        [pa.array(position_indices)], names=[id_field_name]
+                    )
             else:
                 # Create synthetic IDs when no unique_id_field is available
                 size = len(tb)
                 position_indices = [f"pos_{i}" for i in range(size)]
-                tile_tb = pa.Table.from_arrays([pa.array(position_indices)], names=[id_field_name])
+                tile_tb = pa.Table.from_arrays(
+                    [pa.array(position_indices)], names=[id_field_name]
+                )
 
             if "all_set" in tb.column_names:
-                if tb["all_set"][0].as_py() == True:
+                if tb["all_set"][0].as_py():
                     datum_ids.extend(tile_tb[id_field_name].to_pylist())
             else:
                 # filter on rows
                 try:
-                    tb = tb.append_column(id_field_name, tile_tb[id_field_name])
-                    datum_ids.extend(tb.filter(pc.field("bitmask") == True)[id_field_name].to_pylist())
+                    tb = tb.append_column(
+                        id_field_name, tile_tb[id_field_name]
+                    )
+                    datum_ids.extend(
+                        tb.filter(pc.field("bitmask") == True)[
+                            id_field_name
+                        ].to_pylist()
+                    )
                 except Exception as e:
-                    raise Exception(f"Failed to fetch datums in tag. {e}")
+                    raise Exception(
+                        f"Failed to fetch datums in tag. {e}"
+                    )
         return datum_ids
 
     def _get_tag_by_name(self, name: str) -> Dict:
@@ -968,7 +1137,9 @@ class AtlasMapTags:
         for tag in self.get_tags():
             if tag["tag_name"] == name:
                 return tag
-        raise ValueError(f"Tag {name} not found in projection {self.projection.id}.")
+        raise ValueError(
+            f"Tag {name} not found in projection {self.projection.id}."
+        )
 
     def _download_tag(self, tag_name: str, overwrite: bool = False):
         """
@@ -977,12 +1148,14 @@ class AtlasMapTags:
         logger.info("Downloading tags")
         tag = self._get_tag_by_name(tag_name)
         tag_definition_id = tag["tag_definition_id"]
-        return self.projection._download_sidecar(f"_tag.{tag_definition_id}", overwrite=overwrite)
+        return self.projection._download_sidecar(
+            f"_tag.{tag_definition_id}", overwrite=overwrite
+        )
 
     def _remove_outdated_tag_files(self, tag_definition_ids: List[str]):
         """
-        Attempts to remove outdated tag files based on tag definition ids.
-        Any tag with a definition not in tag_definition_ids will be deleted.
+        Attempts to remove outdated tag files based on tag definition ids. Any
+        tag with a definition not in tag_definition_ids will be deleted.
 
         Args:
             tag_definition_ids: A list of tag definition ids to keep.
@@ -998,11 +1171,11 @@ class AtlasMapTags:
                     if tag_definition_id in tag_definition_ids:
                         try:
                             file.unlink()
-                        except PermissionError:
-                            print("Permission denied: unable to delete outdated tag file. Skipping")
-                            return
                         except Exception as e:
-                            print(f"Exception occurred when trying to delete outdated tag file: {e}. Skipping")
+                            print(
+                                f"Exception occurred when trying to delete "
+                                f"outdated tag file: {e}. Skipping"
+                            )
                             return
 
     def add(self, ids: List[str], tags: List[str]):
@@ -1014,9 +1187,13 @@ class AtlasMapTags:
         #     tags: A list containing the tags you want to apply to these data points.
 
         # '''
-        raise NotImplementedError("AtlasMapTags.add is currently not supported.")
+        raise NotImplementedError(
+            "AtlasMapTags.add is currently not supported."
+        )
 
-    def remove(self, ids: List[str], tags: List[str], delete_all: bool = False) -> bool:
+    def remove(
+        self, ids: List[str], tags: List[str], delete_all: bool = False
+    ) -> bool:
         # '''
         # Deletes the specified tags from the given data points.
 
@@ -1029,7 +1206,9 @@ class AtlasMapTags:
         #     True on success.
 
         # '''
-        raise NotImplementedError("AtlasMapTags.remove is currently not supported.")
+        raise NotImplementedError(
+            "AtlasMapTags.remove is currently not supported."
+        )
 
     def __repr__(self) -> str:
         return str(self.df)
@@ -1037,8 +1216,8 @@ class AtlasMapTags:
 
 class AtlasMapData:
     """
-    Atlas Map Data (Metadata) State. This is how you can access text and other associated metadata columns
-    you uploaded with your project.
+    Atlas Map Data (Metadata) State. This is how you can access text and other
+    associated metadata columns you uploaded with your project.
     """
 
     def __init__(self, projection: "AtlasProjection", fields=None):  # type: ignore
@@ -1049,11 +1228,14 @@ class AtlasMapData:
             self.fields = self.dataset.dataset_fields
         else:
             for field in fields:
-                assert field in self.dataset.dataset_fields, f"Field {field} not found in dataset fields."
+                assert field in self.dataset.dataset_fields, (
+                    f"Field {field} not found in dataset fields."
+                )
             self.fields = fields
         self._tb = None
         self._has_unique_id_field = (
-            "unique_id_field" in self.dataset.meta and self.dataset.meta["unique_id_field"] is not None
+            "unique_id_field" in self.dataset.meta
+            and self.dataset.meta["unique_id_field"] is not None
         )
 
     def _load_data(self, data_columns: List[Tuple[str, str]]):
@@ -1061,26 +1243,36 @@ class AtlasMapData:
         Loads data from a list of data columns (field and sidecar name tuples).
 
         Args:
-            data_columns: A list of tuples containing field name and sidecar name.
+            data_columns: A list of tuples containing field name and sidecar
+            name.
         """
         tbs = []
 
-        sidecars_to_load = set([sidecar for _, sidecar in data_columns if sidecar != "datum_id"])
+        sidecars_to_load = set(
+            [sidecar for _, sidecar in data_columns if sidecar != "datum_id"]
+        )
         logger.info("Loading data")
         for key in tqdm(self.projection._manifest["key"].to_pylist()):
             # Use datum id as root table if available, otherwise create synthetic IDs
             if self._has_unique_id_field:
                 try:
-                    datum_id_path = self.projection.tile_destination / Path(key).with_suffix(".datum_id.feather")
+                    datum_id_path = (
+                        self.projection.tile_destination
+                        / Path(key).with_suffix(".datum_id.feather")
+                    )
                     tb = feather.read_table(datum_id_path, memory_map=True)
                 except (FileNotFoundError, pa.ArrowInvalid):
                     # Create a synthetic ID table
                     # Using the first sidecar to determine table size
-                    first_sidecar = next(iter(sidecars_to_load)) if sidecars_to_load else ""
+                    first_sidecar = (
+                        next(iter(sidecars_to_load)) if sidecars_to_load else ""
+                    )
                     tb = self._create_synthetic_id_table(key, first_sidecar)
             else:
                 # Create synthetic IDs when no unique_id_field is available
-                first_sidecar = next(iter(sidecars_to_load)) if sidecars_to_load else ""
+                first_sidecar = (
+                    next(iter(sidecars_to_load)) if sidecars_to_load else ""
+                )
                 tb = self._create_synthetic_id_table(key, first_sidecar)
 
             for sidecar in sidecars_to_load:
@@ -1096,20 +1288,24 @@ class AtlasMapData:
                         if col in self.fields:
                             tb = tb.append_column(col, carfile[col])
                 except (FileNotFoundError, pa.ArrowInvalid) as e:
-                    logger.warning(f"Error loading data for key {key}, sidecar {sidecar}: {e}")
+                    logger.warning(
+                        f"Error loading data for key {key}, sidecar {sidecar}: {e}"
+                    )
                     continue
 
             tbs.append(tb)
 
         if not tbs:
-            raise ValueError("No data could be loaded. Data files may be missing or corrupt.")
+            raise ValueError(
+                "No data could be loaded. Data files may be missing or corrupt."
+            )
 
         self._tb = pa.concat_tables(tbs)
 
     def _create_synthetic_id_table(self, key, sidecar):
         """
-        Create a synthetic table with position indices when datum_id file isn't available
-        or when unique_id_field isn't specified.
+        Create a synthetic table with position indices when datum_id file isn't
+        available or when unique_id_field isn't specified.
         """
         # Try to determine the size of the table by loading a sidecar file
         path = self.projection.tile_destination
@@ -1123,13 +1319,19 @@ class AtlasMapData:
             size = len(sidecar_tb)
             # Create a table with position indices as IDs
             position_indices = [f"pos_{i}" for i in range(size)]
-            return pa.Table.from_arrays([pa.array(position_indices)], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array(position_indices)], names=["_position_index"]
+            )
         except Exception as e:
             logger.error(f"Failed to create synthetic IDs for {key}: {e}")
             # Return an empty table as fallback
-            return pa.Table.from_arrays([pa.array([])], names=["_position_index"])
+            return pa.Table.from_arrays(
+                [pa.array([])], names=["_position_index"]
+            )
 
-    def _download_data(self, fields: Optional[List[str]] = None) -> List[Tuple[str, str]]:
+    def _download_data(
+        self, fields: Optional[List[str]] = None
+    ) -> List[Tuple[str, str]]:
         """
         Downloads the feather tree for user uploaded data.
 
@@ -1146,7 +1348,8 @@ class AtlasMapData:
         data_columns_to_load = [
             (str(field), str(sidecar))
             for field, sidecar in self.projection._registered_columns
-            if field[0] != "_" and ((field in fields) or sidecar == "datum_id")
+            if field[0] != "_"
+            and ((field in fields) or sidecar == "datum_id")
         ]
 
         # Only download datum_id if we have a unique ID field
@@ -1154,11 +1357,16 @@ class AtlasMapData:
             try:
                 self.projection._download_sidecar("datum_id")
             except ValueError as e:
-                logger.warning(f"Failed to download datum_id files: {e}. Will use synthetic IDs instead.")
+                logger.warning(
+                    f"Failed to download datum_id files: {e}. Will use "
+                    "synthetic IDs instead."
+                )
                 self._has_unique_id_field = False
 
         # Download all required sidecars for the fields
-        sidecars_to_download = set(sidecar for _, sidecar in data_columns_to_load if sidecar != "datum_id")
+        sidecars_to_download = set(
+            sidecar for _, sidecar in data_columns_to_load if sidecar != "datum_id"
+        )
         for sidecar in sidecars_to_download:
             self.projection._download_sidecar(sidecar)
 
@@ -1167,18 +1375,22 @@ class AtlasMapData:
     @property
     def df(self) -> pd.DataFrame:
         """
-        A pandas DataFrame associating each datapoint on your map to their metadata.
-        Converting to pandas DataFrame may materialize a large amount of data into memory.
+        A pandas DataFrame associating each datapoint on your map to their
+        metadata. Converting to pandas DataFrame may materialize a large amount
+        of data into memory.
         """
-        logger.warning("Converting to pandas dataframe. This may materialize a large amount of data into memory.")
+        logger.warning(
+            "Converting to pandas dataframe. This may materialize a large "
+            "amount of data into memory."
+        )
         return self.tb.to_pandas()
 
     @property
     def tb(self) -> pa.Table:
         """
-        Pyarrow table associating each datapoint on the map to their metadata columns.
-        This table is memmapped from the underlying files and is the most efficient way to
-        access metadata information.
+        Pyarrow table associating each datapoint on the map to their metadata
+        columns. This table is memmapped from the underlying files and is the
+        most efficient way to access metadata information.
         """
         if isinstance(self._tb, pa.Table):
             return self._tb

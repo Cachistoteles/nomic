@@ -1,19 +1,15 @@
 {
     "include": [
         "nomic",
-    ],
-  
-    "exclude": [
-        "**/__pycache__",
         "examples",
         "docs",
         "build",
         "nomic/tests"
     ],
-  
-    "ignore": [
-    ],
-  
-    "defineConstant": {
-    },
+
+    "exclude": [],
+
+    "ignore": [],
+
+    "defineConstant": {}
 }
