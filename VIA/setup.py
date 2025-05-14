@@ -1,13 +1,11 @@
 """Setup file for the Atlas Client"""
 
-import os
-import sys
 from setuptools import setup, find_packages
 
 description = "The official Nomic python client."
 
 # Read README.md and remove tables and images
-with open("README.md") as f:
+with open("README.md", encoding="utf-8") as f:
     content = f.read()
     # Remove table sections including content
     while "<table>" in content and "</table>" in content:
@@ -53,7 +51,7 @@ setup(
         "local": [
             "gpt4all>=2.5.0,<3",
         ],
-        "aws": ["boto3", "sagemaker"],
+        "aws": ["boto3"],
         "all": [
             "nomic[local,aws]",
         ],
